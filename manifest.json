@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "id": "3lymn.plugin-drawer",
+  "name": "Plugin Drawer",
+  "version": "1.0.0",
+  "author": "Aly Sarhan",
+  "license": "MIT",
+  "description": "Collapse chosen bar plugins into a tray-style drawer",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Plugin Drawer",
+    "description": "Collapse chosen bar widgets into a tray-style drawer",
+    "category": "Status",
+    "allowMultiple": false,
+    "defaultSection": "center",
+    "defaults": {
+      "widgets": []
+    }
+  }
+}
