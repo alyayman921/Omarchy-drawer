@@ -1,10 +1,11 @@
 import QtQuick
 import Quickshell
+import Quickshell.Io
 import QtQuick.Controls
 import qs.Commons
 import qs.Ui
 
-// Widget drawer: collapse chosen bar widgets into a single menu button.
+// Plugin Drawer: collapse chosen bar widgets into a single menu button.
 //
 // Widgets listed in the `widgets` inline setting (or the manifest defaults)
 // are removed from the bar layout but stay mounted here — invisibly, at the
@@ -12,8 +13,8 @@ import qs.Ui
 // opens their own panel anchored to the bar, right underneath the drawer.
 //
 // Left-clicking the hamburger opens the menu with the hidden widgets; the
-// "Add / remove widgets" footer switches to a manage list that moves plugins
-// between the bar and the drawer.
+// "Edit plugins" footer switches to a manage list that moves plugins between
+// the bar and the drawer, enables/disables them, and removes third-party ones.
 BarWidget {
   id: root
   moduleName: "3lymn.plugin-drawer"
@@ -69,19 +70,38 @@ BarWidget {
     return out
   }
 
-  // Every registered bar widget except the drawer itself, for the manage list.
-  // Widgets hidden in the drawer come first, then the rest alphabetically.
+  // Every discovered plugin except the drawer itself, for the manage list. Read
+  // from the plugin registry (not just the bar widget registry) so plugins that
+  // are disabled — or not bar widgets at all — can still be enabled, disabled,
+  // or removed here. Drawer-configured widgets come first, then enabled
+  // plugins, then the rest; alphabetical within each group. Plugins that can't
+  // sit on the bar (custom, non bar-widgets) come next, and first-party
+  // plugins (which can't be removed) are pushed to the very bottom.
   readonly property var allPlugins: {
-    var reg = root.registryWidgets
     var hidden = {}
     var configured = root.configuredIds
     for (var h = 0; h < configured.length; h++) hidden[configured[h]] = true
+    var reg = root.bar && root.bar.shell && root.bar.shell.pluginRegistry
+    var installed = reg && reg.installedPlugins ? reg.installedPlugins : null
     var out = []
-    for (var id in reg) if (id !== root.moduleName) out.push(id)
+    if (installed) {
+      for (var id in installed) if (id !== root.moduleName) out.push(id)
+    } else {
+      var widgets = root.registryWidgets
+      for (var wid in widgets) if (wid !== root.moduleName) out.push(wid)
+    }
     out.sort(function(a, b) {
-      var ah = hidden[a] ? 0 : 1
-      var bh = hidden[b] ? 0 : 1
-      if (ah !== bh) return ah - bh
+      function rank(x) {
+        if (hidden[x]) return 0
+        var firstParty = root.isFirstPartyPlugin(x)
+        var isWidget = root.isBarWidgetPlugin(x)
+        if (firstParty) return 5
+        if (!isWidget) return 4
+        return root.pluginEnabled(x) ? 1 : 2
+      }
+      var ra = rank(a)
+      var rb = rank(b)
+      if (ra !== rb) return ra - rb
       var na = root.displayName(a).toLowerCase()
       var nb = root.displayName(b).toLowerCase()
       return na < nb ? -1 : (na > nb ? 1 : 0)
@@ -91,13 +111,51 @@ BarWidget {
 
   function defaultsFor(id) {
     var entry = root.registryWidgets[id]
-    return entry && entry.metadata && entry.metadata.defaults ? entry.metadata.defaults : ({})
+    if (entry && entry.metadata && entry.metadata.defaults) return entry.metadata.defaults
+    var manifest = root.pluginManifest(id)
+    return manifest && manifest.barWidget && manifest.barWidget.defaults
+      ? manifest.barWidget.defaults : ({})
   }
 
   function displayName(id) {
     var entry = root.registryWidgets[id]
     if (entry && entry.metadata && entry.metadata.displayName) return String(entry.metadata.displayName)
+    var manifest = root.pluginManifest(id)
+    if (manifest && manifest.name) return String(manifest.name)
     return id
+  }
+
+  // Manifest lookup falls back to the plugin registry so disabled plugins (no
+  // bar registry entry) still show their real name and kinds in the edit list.
+  function pluginManifest(id) {
+    var reg = root.bar && root.bar.shell && root.bar.shell.pluginRegistry
+    return reg && reg.installedPlugins ? (reg.installedPlugins[String(id || "")] || null) : null
+  }
+
+  function pluginEnabled(id) {
+    var reg = root.bar && root.bar.shell && root.bar.shell.pluginRegistry
+    if (!reg || typeof reg.isEnabled !== "function") return false
+    return reg.isEnabled(String(id || ""))
+  }
+
+  function isBarWidgetPlugin(id) {
+    var manifest = root.pluginManifest(id)
+    return !!(manifest && Array.isArray(manifest.kinds) && manifest.kinds.indexOf("bar-widget") !== -1)
+  }
+
+  function isFirstPartyPlugin(id) {
+    var manifest = root.pluginManifest(id)
+    return !!(manifest && manifest.__isFirstParty)
+  }
+
+  // A widget-style disable (take it off the bar / out of the drawer) is only
+  // meaningful while the plugin is referenced in the config. A first-party
+  // non-widget is always loadable, so it disables via disabledPlugins[].
+  function canDisable(id) {
+    var key = String(id || "")
+    if (!key) return false
+    if (root.isBarWidgetPlugin(key)) return root.layoutHas(key) || root.pluginsHas(key)
+    return root.pluginEnabled(key)
   }
 
   // --- menu state ------------------------------------------------------------
@@ -128,8 +186,36 @@ BarWidget {
     root.pendingDrawerIds = list
   }
 
+  // Plugin ids the user has marked for removal in the manage list. They are
+  // only deleted when the drawer is dismissed (close / leaveManageMode /
+  // closeForPopoutSwitch), so several can be queued up at once.
+  property var pendingRemoveIds: []
+
+  // Plugin ids whose config still needs cleaning once the file deletion
+  // process (started when removals are committed) has finished. Kept as a
+  // property so the Process's onExited handler — which fires after the
+  // deletion actually completes — can finish the job without the in-flight rm
+  // being killed by the config-change triggered bar rebuild.
+  property var pendingCleanIds: []
+
+  function isRemovePending(id) {
+    return root.pendingRemoveIds.indexOf(String(id || "")) !== -1
+  }
+
+  function toggleRemovePending(id) {
+    var key = String(id || "")
+    if (!key || root.isFirstPartyPlugin(key)) return
+    var list = root.pendingRemoveIds.slice()
+    var i = list.indexOf(key)
+    if (i === -1) list.push(key)
+    else list.splice(i, 1)
+    root.pendingRemoveIds = list
+    root.manageRevision++
+  }
+
   // Move every staged difference between the drawer and the bar. Returns true
-  // when anything changed, so the caller knows a shell restart is worthwhile.
+  // when anything changed (the config mutation itself triggers the hot reload
+  // and the drawer's auto-reconcile; no shell restart is required).
   function commitDrawerChanges() {
     var current = root.configuredIds.slice()
     var pending = root.pendingDrawerIds.slice()
@@ -147,11 +233,6 @@ BarWidget {
       }
     }
     return changed
-  }
-
-  function scheduleShellRestart() {
-    var bar = root.bar
-    if (bar && typeof bar.run === "function") bar.run("omarchy-restart-shell")
   }
 
   // In-drawer drag state: the id being dragged, the insertion index (before
@@ -176,26 +257,23 @@ BarWidget {
 
   function dragMove(handle, mouseX, mouseY) {
     root.dragStarted = true
-    var menuPos = menuColumn.mapFromItem(handle, mouseX, mouseY)
-    root.dragGhostX = menuPos.x
-    root.dragGhostY = menuPos.y
-
-    // Disabled: dragging a drawer row out of the list used to mean "drop back
-    // on the bar". Cross-bar drag moves are off; rows only reorder in-drawer.
-    // var local = drawerColumn.mapFromItem(handle, mouseX, mouseY)
-    // var insideList = local.x >= 0 && local.x <= drawerColumn.width &&
-    //   local.y >= 0 && local.y <= drawerColumn.height
-    // root.dragShowZone = !insideList
-    // if (root.dragShowZone) {
-    //   root.dragTargetIndex = -1
-    //   return
-    // }
+    root.dragGhostX = 0
+    // Insertion boundary follows the cursor within the row: the top half of a
+    // row means "before it", the bottom half "after it". Rows are 30px tall
+    // with 4px spacing, so the pitch is 34.
     var local = drawerColumn.mapFromItem(handle, mouseX, mouseY)
     var count = root.hiddenIds.length
-    var index = Math.floor(local.y / 34)
-    if (index < 0) index = 0
+    var pitch = 34
+    var rowIndex = Math.floor(local.y / pitch)
+    var index
+    if (rowIndex < 0) index = 0
+    else if (rowIndex >= count) index = count
+    else index = (local.y - rowIndex * pitch) < 15 ? rowIndex : rowIndex + 1
     if (index > count) index = count
     root.dragTargetIndex = index
+    // The ghost snaps to the slot it will land in so the drop position is
+    // obvious instead of trailing the cursor.
+    root.dragGhostY = Math.max(0, Math.min(count - 1, index)) * pitch
   }
 
   function dragEnd() {
@@ -226,24 +304,24 @@ BarWidget {
     root.manageMode = false
   }
   function close() {
-    var changed = root.commitDrawerChanges()
+    root.commitRemoveChanges()
+    root.commitDrawerChanges()
     root.menuOpen = false
     root.manageMode = false
     root.manageRevision++
-    if (changed) root.scheduleShellRestart()
   }
   function closeForPopoutSwitch() {
-    var changed = root.commitDrawerChanges()
+    root.commitRemoveChanges()
+    root.commitDrawerChanges()
     root.menuOpen = false
     root.manageMode = false
     root.manageRevision++
-    if (changed) root.scheduleShellRestart()
   }
   function leaveManageMode() {
-    var changed = root.commitDrawerChanges()
+    root.commitRemoveChanges()
+    root.commitDrawerChanges()
     root.manageMode = false
     root.manageRevision++
-    if (changed) root.scheduleShellRestart()
   }
 
   implicitWidth: button.implicitWidth
@@ -268,7 +346,7 @@ BarWidget {
     anchors.fill: parent
     bar: root.bar
     text: "\uf0c9"
-    tooltipText: "Widget drawer"
+    tooltipText: "Plugin Drawer"
     onPressed: function(b) {
       if (b !== Qt.LeftButton) return
       if (root.menuOpen) root.close()
@@ -299,13 +377,32 @@ BarWidget {
   function openWidget(id) {
     var w = root.mountedItem(id)
     if (w) {
+      var toggled = false
+      // Panel-style widgets and most clones expose a root toggle().
       if (typeof w.toggle === "function") {
         w.toggle()
+        toggled = true
       } else if ("popupOpen" in w) {
+        // Widgets that own a popupOpen boolean (prayer-times, kanban, ...).
         w.popupOpen = !w.popupOpen
+        toggled = true
       } else if ("opened" in w && typeof w.open === "function" && typeof w.close === "function") {
         if (w.opened) w.close()
         else w.open()
+        toggled = true
+      } else if ("menuOpen" in w && typeof w.open === "function" && typeof w.close === "function") {
+        if (w.menuOpen) w.close()
+        else w.open()
+        toggled = true
+      } else if (typeof w.open === "function" && typeof w.close === "function") {
+        // Plain open/close pair with no exposed state property.
+        w.open()
+        toggled = true
+      }
+      if (!toggled && root.bar && typeof root.bar.shell.toggle === "function") {
+        // Last resort: route through the shell's canonical toggle so any
+        // widget with a registered IPC handler still responds.
+        root.bar.shell.toggle(id, "{}")
       }
     }
     root.menuOpen = false
@@ -371,7 +468,7 @@ BarWidget {
           anchors.left: parent.left
           anchors.right: backButton.visible ? backButton.left : (penButton.visible ? penButton.left : parent.right)
           anchors.rightMargin: Style.space(8)
-          text: root.manageMode ? "Add / remove widgets" : "Widget drawer"
+          text: root.manageMode ? "Edit plugins" : "Plugin Drawer"
           color: root.bar ? root.bar.foreground : Color.foreground
           font.family: root.bar ? root.bar.fontFamily : Style.font.family
           font.pixelSize: Style.font.body
@@ -449,15 +546,19 @@ BarWidget {
               Rectangle {
                 anchors.fill: parent
                 radius: Math.max(2, Style.cornerRadius)
-                color: (!root.dragActive && drowMouse.containsMouse) ? Style.hoverFillFor(root.bar ? root.bar.foreground : Color.foreground, root.bar ? root.bar.foreground : Color.foreground) : "transparent"
+                color: root.dragActive && root.dragTargetIndex === drow.index
+                  ? Util.alpha(Color.accent, 0.18)
+                  : (!root.dragActive && drowMouse.containsMouse
+                      ? Style.hoverFillFor(root.bar ? root.bar.foreground : Color.foreground, root.bar ? root.bar.foreground : Color.foreground)
+                      : "transparent")
               }
 
               Rectangle {
                 anchors.top: parent.top
                 anchors.left: parent.left
                 anchors.right: parent.right
-                height: 2
-                radius: 1
+                height: 3
+                radius: 1.5
                 color: Color.accent
                 visible: root.dragActive && !root.dragShowZone && root.dragId !== drow.rowId && root.dragTargetIndex === drow.index
               }
@@ -519,8 +620,8 @@ BarWidget {
               anchors.top: parent.top
               anchors.left: parent.left
               anchors.right: parent.right
-              height: 2
-              radius: 1
+              height: 3
+              radius: 1.5
               color: Color.accent
               visible: root.dragActive && !root.dragShowZone && root.dragTargetIndex === root.hiddenIds.length
             }
@@ -550,21 +651,21 @@ BarWidget {
               id: mrow
               required property string modelData
               width: manageColumn.width
-              implicitHeight: 28
+              implicitHeight: 34
 
               readonly property string rowId: mrow.modelData
-              readonly property bool checked: {
-                var pending = root.pendingDrawerIds
-                void pending
-                return pending.indexOf(mrow.rowId) !== -1
-              }
+              readonly property bool isWidget: root.isBarWidgetPlugin(mrow.rowId)
+              readonly property bool enabled: root.pluginEnabled(mrow.rowId)
+              readonly property bool checked: root.isPending(mrow.rowId)
 
               Rectangle {
                 anchors.fill: parent
                 radius: Math.max(2, Style.cornerRadius)
-                color: mrowMouse.containsMouse
-                  ? Style.hoverFillFor(root.bar ? root.bar.foreground : Color.foreground, root.bar ? root.bar.foreground : Color.foreground)
-                  : "transparent"
+                color: root.isRemovePending(mrow.rowId)
+                  ? Util.alpha(Color.urgent, 0.18)
+                  : (mrowMouse.containsMouse
+                    ? Style.hoverFillFor(root.bar ? root.bar.foreground : Color.foreground, root.bar ? root.bar.foreground : Color.foreground)
+                    : "transparent")
               }
 
               BorderSurface {
@@ -575,6 +676,7 @@ BarWidget {
                 width: Style.space(16)
                 height: Style.space(16)
                 radius: Math.max(2, Style.cornerRadius / 2)
+                visible: mrow.isWidget
                 color: mrow.checked
                   ? Style.selectedFillFor(root.bar ? root.bar.foreground : Color.foreground, root.bar ? root.bar.foreground : Color.foreground)
                   : "transparent"
@@ -596,7 +698,7 @@ BarWidget {
               Text {
                 anchors.verticalCenter: parent.verticalCenter
                 anchors.left: checkbox.right
-                anchors.right: parent.right
+                anchors.right: rowActions.left
                 anchors.leftMargin: Style.space(8)
                 anchors.rightMargin: Style.space(8)
                 text: root.displayName(mrow.rowId)
@@ -613,7 +715,63 @@ BarWidget {
                 hoverEnabled: true
                 preventStealing: true
                 cursorShape: Qt.PointingHandCursor
-                onClicked: root.togglePending(mrow.rowId)
+                onClicked: {
+                  if (mrow.isWidget) root.togglePending(mrow.rowId)
+                }
+              }
+
+              Row {
+                id: rowActions
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(8)
+                anchors.verticalCenter: parent.verticalCenter
+                spacing: Style.space(4)
+
+                Button {
+                  width: 24
+                  height: 24
+                  text: "\uf00c"
+                  tooltipText: mrow.enabled ? "Already enabled" : "Enable plugin"
+                  foreground: root.bar ? root.bar.foreground : Color.foreground
+                  opacity: mrow.enabled ? 0.35 : 1.0
+                  horizontalPadding: 0
+                  verticalPadding: 0
+                  onClicked: {
+                    if (!mrow.enabled) root.enablePluginNow(mrow.rowId)
+                  }
+                }
+
+                Button {
+                  width: 24
+                  height: 24
+                  text: "\uf00d"
+                  tooltipText: root.canDisable(mrow.rowId) ? "Disable plugin" : "Cannot disable"
+                  foreground: root.bar ? root.bar.foreground : Color.foreground
+                  opacity: root.canDisable(mrow.rowId) ? 1.0 : 0.35
+                  horizontalPadding: 0
+                  verticalPadding: 0
+                  onClicked: {
+                    if (root.canDisable(mrow.rowId)) root.disablePluginNow(mrow.rowId)
+                  }
+                }
+
+                Button {
+                  width: 24
+                  height: 24
+                  text: "\uf1f8"
+                  tooltipText: root.isFirstPartyPlugin(mrow.rowId)
+                    ? "Built-in plugin, cannot be removed"
+                    : (root.isRemovePending(mrow.rowId) ? "Marked for removal — click to cancel" : "Remove plugin")
+                  foreground: root.isRemovePending(mrow.rowId)
+                    ? Color.accent
+                    : Color.foreground
+                  opacity: root.isFirstPartyPlugin(mrow.rowId) ? 0.35 : 1.0
+                  horizontalPadding: 0
+                  verticalPadding: 0
+                  onClicked: {
+                    if (!root.isFirstPartyPlugin(mrow.rowId)) root.toggleRemovePending(mrow.rowId)
+                  }
+                }
               }
             }
           }
@@ -625,13 +783,11 @@ BarWidget {
           z: 20
           x: root.dragGhostX
           y: root.dragGhostY
-          width: root.dragShowZone ? menuColumn.width : Math.min(menuColumn.width, Math.max(120, dragGhostText.implicitWidth + Style.space(16)))
+          width: drawerColumn.width
           height: 30
           radius: Math.max(2, Style.cornerRadius)
-          color: root.dragShowZone
-            ? Style.selectedFillFor(root.bar ? root.bar.foreground : Color.foreground, root.bar ? root.bar.foreground : Color.foreground)
-            : Style.hoverFillFor(root.bar ? root.bar.foreground : Color.foreground, root.bar ? root.bar.foreground : Color.foreground)
-          border.width: root.dragShowZone ? 1 : 0
+          color: Util.alpha(Color.accent, 0.25)
+          border.width: 1.5
           border.color: Color.accent
 
           Text {
@@ -644,6 +800,7 @@ BarWidget {
             color: root.bar ? root.bar.foreground : Color.foreground
             font.family: root.bar ? root.bar.fontFamily : Style.font.family
             font.pixelSize: Style.font.bodySmall
+            font.bold: true
             elide: Text.ElideRight
           }
         }
@@ -661,9 +818,21 @@ BarWidget {
   // reconcile once so an existing shell.json catches up automatically.
 
   function persistWidgets(list) {
-    var shell = root.bar && root.bar.shell
-    if (!shell || typeof shell.updateEntryInline !== "function") return
-    shell.updateEntryInline(root.moduleName, { id: root.moduleName, widgets: list })
+    var id = root.moduleName
+    root.mutateConfig(function(c) {
+      if (!c || !c.bar || !c.bar.layout) return
+      var sections = ["left", "center", "right"]
+      for (var s = 0; s < sections.length; s++) {
+        var arr = c.bar.layout[sections[s]]
+        if (!Array.isArray(arr)) continue
+        for (var k = 0; k < arr.length; k++) {
+          if (arr[k] && String(arr[k].id || "") === id) {
+            arr[k].widgets = list.slice()
+            return
+          }
+        }
+      }
+    })
   }
 
   function moveWidgetToIndex(id, toIndex) {
@@ -784,14 +953,225 @@ BarWidget {
     root.persistWidgets(list)
   }
 
-  // Reconcile on load: every configured id leaves the bar layout and stays
-  // enabled via plugins[]. Each step is guarded, so a hot-reload triggered by
-  // the persist cannot loop.
+  // --- plugin enable / disable / remove -------------------------------------
+  //
+  // Beyond drawer membership, the edit menu toggles a plugin's *enabled*
+  // state. Bar-widget plugins are enabled into the drawer (config-only, so
+  // the bar is not rebuilt and the open menu survives); everything else goes
+  // through the plugin registry's setEnabled. Removal is staged like drawer
+  // membership: the bin click only marks the plugin (icon turns grey), and
+  // everything marked is deleted together when the user leaves edit mode —
+  // config references cleaned, plugin directory removed (backing up non-git
+  // dirs), then one registry reload.
+
+  Process {
+    id: removeProcess
+    stdout: StdioCollector { id: removeStdout; waitForEnd: true }
+    stderr: StdioCollector { id: removeStderr; waitForEnd: true }
+    onExited: {
+      // Files are gone now, so the config cleanup below is safe: the bar rebuild
+      // it triggers can no longer interrupt an in-flight file deletion.
+      for (var k = 0; k < root.pendingCleanIds.length; k++) root.cleanPluginConfig(root.pendingCleanIds[k])
+      root.pendingCleanIds = []
+      root.reloadPlugins()
+    }
+  }
+
+  function removeFromDisabledPlugins(key) {
+    root.mutateConfig(function(c) {
+      if (!c || !Array.isArray(c.disabledPlugins)) return
+      var kept = []
+      for (var i = 0; i < c.disabledPlugins.length; i++) {
+        if (String(c.disabledPlugins[i] || "") !== key) kept.push(c.disabledPlugins[i])
+      }
+      c.disabledPlugins = kept
+    })
+  }
+
+  function enablePluginNow(id) {
+    var key = String(id || "")
+    if (!key || root.pluginEnabled(key)) return
+    if (root.isBarWidgetPlugin(key)) {
+      root.setDrawer(key, true)
+      root.removeFromDisabledPlugins(key)
+      if (root.pendingDrawerIds.indexOf(key) === -1)
+        root.pendingDrawerIds = root.pendingDrawerIds.concat([key])
+    } else {
+      var reg = root.bar && root.bar.shell && root.bar.shell.pluginRegistry
+      if (reg && typeof reg.setEnabled === "function") reg.setEnabled(key, true)
+    }
+    root.manageRevision++
+  }
+
+  function disablePluginNow(id) {
+    var key = String(id || "")
+    if (!key || !root.canDisable(key)) return
+    var pending = root.pendingDrawerIds.slice()
+    var pi = pending.indexOf(key)
+    if (pi !== -1) { pending.splice(pi, 1); root.pendingDrawerIds = pending }
+    var configured = root.configuredIds.slice()
+    var ci = configured.indexOf(key)
+    if (ci !== -1) { configured.splice(ci, 1); root.persistWidgets(configured) }
+    var reg = root.bar && root.bar.shell && root.bar.shell.pluginRegistry
+    if (reg && typeof reg.setEnabled === "function") reg.setEnabled(key, false)
+    root.manageRevision++
+  }
+
+  // Strip every config reference to a plugin: bar layout, plugins[],
+  // disabledPlugins[], the drawer's widget list, and any staged membership.
+  function cleanPluginConfig(key) {
+    var pending = root.pendingDrawerIds.slice()
+    var pending = root.pendingDrawerIds.slice()
+    var pi = pending.indexOf(key)
+    if (pi !== -1) { pending.splice(pi, 1); root.pendingDrawerIds = pending }
+    var configured = root.configuredIds.slice()
+    var ci = configured.indexOf(key)
+    if (ci !== -1) { configured.splice(ci, 1); root.persistWidgets(configured) }
+    var sections = ["left", "center", "right"]
+    root.mutateConfig(function(c) {
+      if (!c) return
+      if (c.bar && c.bar.layout) {
+        for (var s = 0; s < sections.length; s++) {
+          var a = c.bar.layout[sections[s]]
+          if (!Array.isArray(a)) continue
+          var kept = []
+          for (var j = 0; j < a.length; j++) {
+            if (!(a[j] && String(a[j].id || "") === key)) kept.push(a[j])
+          }
+          c.bar.layout[sections[s]] = kept
+        }
+      }
+      if (Array.isArray(c.plugins)) {
+        var pk = []
+        for (var k = 0; k < c.plugins.length; k++) {
+          if (!(c.plugins[k] && String(c.plugins[k].id || "") === key)) pk.push(c.plugins[k])
+        }
+        c.plugins = pk
+      }
+      if (Array.isArray(c.disabledPlugins)) {
+        var dk = []
+        for (var d = 0; d < c.disabledPlugins.length; d++) {
+          if (String(c.disabledPlugins[d] || "") !== key) dk.push(c.disabledPlugins[d])
+        }
+        c.disabledPlugins = dk
+      }
+    })
+    root.manageRevision++
+  }
+
+  // Remove a plugin immediately on bin click. The file deletion runs first and
+  // config cleanup happens in the Process's onExited, i.e. only after the rm has
+  // actually finished. A config mutation (cleanPluginConfig → persistShellConfig)
+  // triggers a bar rebuild via onShellConfigChanged → syncPluginWidgets, and that
+  // rebuild destroys this drawer instance and kills any still-running child
+  // Process — so cleaning config synchronously here would tear the rm down
+  // mid-flight, leave the plugin's files on disk, and let the next rescan
+  // re-register it.
+  // Apply every staged removal. File deletion runs first (one bash script
+  // deletes all marked plugin dirs); config cleanup happens in the Process's
+  // onExited handler, i.e. only after the rm has actually finished. A config
+  // mutation (cleanPluginConfig → persistShellConfig) triggers a bar rebuild
+  // via onShellConfigChanged → syncPluginWidgets, and that rebuild destroys
+  // this drawer instance and kills any still-running child Process — so
+  // cleaning config synchronously here would tear the rm down mid-flight,
+  // leave the plugin's files on disk, and let the next rescan re-register it.
+  function commitRemoveChanges() {
+    var ids = root.pendingRemoveIds
+    if (!ids || ids.length === 0) return
+    var reg = root.bar && root.bar.shell && root.bar.shell.pluginRegistry
+    var pluginsDir = reg ? String(reg.pluginsDir || "") : ""
+    var scripts = []
+    var all = []
+    for (var i = 0; i < ids.length; i++) {
+      var key = String(ids[i] || "")
+      if (!key) continue
+      all.push(key)
+      var manifest = root.pluginManifest(key)
+      var dir = manifest ? String(manifest.__sourceDir || "") : ""
+      if (dir) scripts.push(root.removeScript(key, dir, pluginsDir))
+    }
+    root.pendingRemoveIds = []
+    root.pendingCleanIds = all
+    if (scripts.length) {
+      removeProcess.command = ["bash", "-c", scripts.join("\n")]
+      removeProcess.running = true
+    } else {
+      for (var k = 0; k < root.pendingCleanIds.length; k++) root.cleanPluginConfig(root.pendingCleanIds[k])
+      root.pendingCleanIds = []
+      root.reloadPlugins()
+    }
+  }
+
+  function reloadPlugins() {
+    var shell = root.bar && root.bar.shell
+    if (shell && typeof shell.reloadPlugins === "function") shell.reloadPlugins()
+    else {
+      var reg = root.bar && root.bar.shell && root.bar.shell.pluginRegistry
+      if (reg && typeof reg.rescan === "function") reg.rescan()
+    }
+  }
+
+  // Shell command that removes a plugin's files: symlinks are unlinked, git
+  // clones deleted outright, anything else moved aside as a dot-hidden backup
+  // so a manual undo stays possible.
+  function removeScript(key, dir, pluginsDir) {
+    function q(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
+    var dirQ = q(dir)
+    var parts = ["set -e"]
+    parts.push("if [ -L " + dirQ + " ]; then rm -f " + dirQ + ";")
+    parts.push("elif [ -d " + dirQ + "/.git ]; then rm -rf " + dirQ + ";")
+    parts.push("elif [ -d " + dirQ + " ]; then mv " + dirQ + " " + q(pluginsDir + "/." + key + ".bak.") + "$(date +%s)")
+    parts.push("fi")
+    return parts.join("\n")
+  }
+
+  // Reconcile on load: every configured id stays enabled via plugins[] so the
+  // drawer can mount it. This only *enables*; it never moves a widget off the
+  // bar — if the user placed a configured widget on the bar, it stays there.
   function syncHiddenFromLayout() {
     var configured = root.configuredIds
     for (var i = 0; i < configured.length; i++) {
-      root.removeFromLayoutAndKeepEnabled(configured[i])
+      root.ensureConfiguredEnabled(configured[i])
     }
+  }
+
+  // Ensure a configured widget is enabled (in plugins[]) so the drawer can
+  // mount it. Bar placement is never touched here.
+  function ensureConfiguredEnabled(key) {
+    var shell = root.bar && root.bar.shell
+    if (!shell || !shell.shellConfig) return
+    if (root.layoutHas(key)) return
+    if (root.pluginsHas(key)) return
+    root.mutateConfig(function(c) {
+      if (!c) return
+      if (!Array.isArray(c.plugins)) c.plugins = []
+      var exists = false
+      for (var k = 0; k < c.plugins.length; k++) {
+        if (c.plugins[k] && String(c.plugins[k].id || "") === key) { exists = true; break }
+      }
+      if (!exists) c.plugins.push({ id: key })
+    })
+  }
+
+  // Auto-park: whenever the plugin registry or config changes (plugin enabled
+  // on the bar from outside the drawer, a rescan, a shell.json reload), make
+  // sure every configured drawer widget is off the bar and parked in plugins[]
+  // so it stays enabled and the drawer can mount it. Debounced so a burst of
+  // config mutations from a single drawer edit settles into one pass; the
+  // guarded mutations make repeat passes no-ops.
+  property var reconcileRegistry: root.bar ? root.bar.shell.pluginRegistry : null
+
+  onBarChanged: root.reconcileRegistry = root.bar ? root.bar.shell.pluginRegistry : null
+
+  Connections {
+    target: root.reconcileRegistry
+    function onPluginsChanged() { reconcileTimer.restart() }
+  }
+
+  Timer {
+    id: reconcileTimer
+    interval: 150
+    onTriggered: root.syncHiddenFromLayout()
   }
 
   // The drawer button acts as a bar drop zone: dragging a bar widget onto it

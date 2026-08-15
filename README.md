@@ -2,6 +2,7 @@
 
 Collapse plugins into a drawer to keep the Omarchy bar clean.
 
+![Showcase](preview.png)
 
 ## Features
 
