@@ -1088,7 +1088,7 @@ BarWidget {
       all.push(key)
       var manifest = root.pluginManifest(key)
       var dir = manifest ? String(manifest.__sourceDir || "") : ""
-      if (dir) scripts.push(root.removeScript(key, dir, pluginsDir))
+      if (dir && pluginsDir) scripts.push(root.removeScript(key, dir, pluginsDir))
     }
     root.pendingRemoveIds = []
     root.pendingCleanIds = all
@@ -1117,10 +1117,21 @@ BarWidget {
   function removeScript(key, dir, pluginsDir) {
     function q(s) { return "'" + String(s).replace(/'/g, "'\\''") + "'" }
     var dirQ = q(dir)
+    var pluginsDirQ = q(pluginsDir)
     var parts = ["set -e"]
+    // Symlinks are only unlinked (never followed), so that is always safe.
     parts.push("if [ -L " + dirQ + " ]; then rm -f " + dirQ + ";")
-    parts.push("elif [ -d " + dirQ + "/.git ]; then rm -rf " + dirQ + ";")
-    parts.push("elif [ -d " + dirQ + " ]; then mv " + dirQ + " " + q(pluginsDir + "/." + key + ".bak.") + "$(date +%s)")
+    // For real directories, confine the action to a direct child of the
+    // plugin registry so a forged/stale __sourceDir cannot delete or move
+    // anything outside it.
+    parts.push("else")
+    parts.push("  base_canon=$(realpath -m " + pluginsDirQ + ")")
+    parts.push("  target=$(realpath -m " + dirQ + ")")
+    parts.push("  rel=${target#\"$base_canon/\"}")
+    parts.push("  if [ \"$rel\" = \"$target\" ] || [ \"$rel\" != \"${rel#*/}\" ]; then echo 'plugin-drawer: refusing non-registry path: '\"$target\"; exit 1; fi")
+    parts.push("  if [ -d " + dirQ + "/.git ]; then rm -rf " + dirQ + ";")
+    parts.push("  elif [ -d " + dirQ + " ]; then mv " + dirQ + " " + q(pluginsDir + "/." + key + ".bak.") + "$(date +%s)")
+    parts.push("  fi")
     parts.push("fi")
     return parts.join("\n")
   }
