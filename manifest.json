@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "3lymn.plugin-drawer",
   "name": "Plugin Drawer",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Aly Sarhan",
   "license": "MIT",
-  "description": "Collapse chosen bar plugins into a tray-style drawer",
+  "description": "Collapse chosen bar plugins into a tray-style drawer, with the ability to remove, disable and enable plugins within",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Plugin Drawer",
-    "description": "Collapse chosen bar widgets into a tray-style drawer",
+    "description": "Collapse chosen bar plugins into a tray-style drawer, with the ability to remove, disable and enable plugins within",
     "category": "Status",
     "allowMultiple": false,
     "defaultSection": "center",
