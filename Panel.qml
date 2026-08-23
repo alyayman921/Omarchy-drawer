@@ -198,6 +198,153 @@ BarWidget {
   // being killed by the config-change triggered bar rebuild.
   property var pendingCleanIds: []
 
+  // --- view + hide state -----------------------------------------------------
+
+  property string viewMode: "grid"
+  property bool showHidden: false
+
+  readonly property color fg: root.bar ? root.bar.foreground : Color.foreground
+  readonly property string ffont: root.bar ? root.bar.fontFamily : Style.font.family
+
+  readonly property int tileSize: Style.space(64)
+  readonly property int tileGap: Style.space(10)
+  readonly property int tileHeight: Style.space(74)
+
+  // Columns and stretched cell width derived from the actual grid width, so the
+  // tiles fill the row instead of leaving a gap on the right.
+  readonly property int gridCols: {
+    var w = drawerGrid.width
+    if (w <= 0) return 3
+    var cols = Math.floor((w + root.tileGap) / (root.tileSize + root.tileGap))
+    return cols < 1 ? 1 : cols
+  }
+  readonly property real gridCellW: {
+    var cols = root.gridCols
+    if (cols < 1) cols = 1
+    var w = drawerGrid.width
+    if (w <= 0) return root.tileSize
+    return (w - (cols - 1) * root.tileGap) / cols
+  }
+
+  // Plugin ids the user has hidden from the drawer view (a subset of the
+  // configured drawer widgets). They stay mounted but are not shown unless
+  // showHidden is on. Persisted on the drawer entry as `hidden`.
+  readonly property var hiddenViewIds: {
+    var rev = root.manageRevision
+    void rev
+    var list = null
+    var shell = root.bar && root.bar.shell
+    var config = shell ? shell.shellConfig : null
+    if (config && config.bar && config.bar.layout) {
+      var sections = ["left", "center", "right"]
+      for (var s = 0; s < sections.length; s++) {
+        var arr = config.bar.layout[sections[s]]
+        if (!Array.isArray(arr)) continue
+        for (var i = 0; i < arr.length; i++) {
+          if (arr[i] && String(arr[i].id || "") === root.moduleName) {
+            if (Array.isArray(arr[i].hidden)) list = arr[i].hidden
+            break
+          }
+        }
+        if (list) break
+      }
+    }
+    if (!Array.isArray(list)) return []
+    var out = []
+    for (var j = 0; j < list.length; j++) {
+      var hid = String(list[j] || "")
+      if (hid) out.push(hid)
+    }
+    return out
+  }
+
+  // Configured widgets that are not hidden from the view.
+  readonly property var drawerVisibleIds: {
+    var hv = {}
+    var h = root.hiddenViewIds
+    for (var i = 0; i < h.length; i++) hv[h[i]] = true
+    var out = []
+    var cfg = root.configuredIds
+    for (var j = 0; j < cfg.length; j++) {
+      if (!hv[cfg[j]]) out.push(cfg[j])
+    }
+    return out
+  }
+
+  // What the drawer actually renders: visible widgets first, then (only while
+  // showHidden is on) the hidden ones, dimmed, so they can be unhidden.
+  readonly property var drawerDisplayIds: {
+    var out = []
+    var vis = root.drawerVisibleIds
+    for (var i = 0; i < vis.length; i++) out.push({ id: vis[i], hidden: false })
+    if (root.showHidden) {
+      var hv = root.hiddenViewIds
+      var cfgSet = {}
+      for (var c = 0; c < root.configuredIds.length; c++) cfgSet[root.configuredIds[c]] = true
+      for (var k = 0; k < hv.length; k++) {
+        if (cfgSet[hv[k]]) out.push({ id: hv[k], hidden: true })
+      }
+    }
+    return out
+  }
+
+  function isHiddenView(id) {
+    return root.hiddenViewIds.indexOf(String(id || "")) !== -1
+  }
+
+  function persistHidden(list) {
+    var id = root.moduleName
+    root.mutateConfig(function(c) {
+      if (!c || !c.bar || !c.bar.layout) return
+      var sections = ["left", "center", "right"]
+      for (var s = 0; s < sections.length; s++) {
+        var arr = c.bar.layout[sections[s]]
+        if (!Array.isArray(arr)) continue
+        for (var k = 0; k < arr.length; k++) {
+          if (arr[k] && String(arr[k].id || "") === id) {
+            arr[k].hidden = list.slice()
+            return
+          }
+        }
+      }
+    })
+  }
+
+  function toggleHiddenView(id) {
+    var key = String(id || "")
+    if (!key) return
+    var list = root.hiddenViewIds.slice()
+    var idx = list.indexOf(key)
+    if (idx === -1) list.push(key)
+    else list.splice(idx, 1)
+    root.persistHidden(list)
+    root.manageRevision++
+  }
+
+  function pluginGlyph(id) {
+    var name = root.displayName(id)
+    if (!name) return "\uf1b2"
+    return name.charAt(0).toUpperCase()
+  }
+
+  // The component the widget renders in the bar. Used as the tile's live
+  // preview so the grid shows the plugin's real bar appearance, falling back
+  // to the first-letter monogram when there is no component.
+  function widgetComponent(c) {
+    var entry = root.registryWidgets[String(c || "")]
+    return entry && entry.component ? entry.component : null
+  }
+
+  // Drawer width adapts to the screen: the grid expands to fill most of the
+  // available width (so cells can stretch), while the list view stays compact.
+  function drawerContentWidth() {
+    var avail = menuPopup.availableCardWidth
+    if (!avail || avail <= 0) avail = Style.space(560)
+    if (root.viewMode === "grid")
+      return menuPopup.fittedContentWidth(Math.max(avail, Style.space(560)), Math.round(avail * 0.72))
+    return menuPopup.fittedContentWidth(Style.space(300))
+  }
+
   function isRemovePending(id) {
     return root.pendingRemoveIds.indexOf(String(id || "")) !== -1
   }
@@ -257,23 +404,38 @@ BarWidget {
 
   function dragMove(handle, mouseX, mouseY) {
     root.dragStarted = true
-    root.dragGhostX = 0
-    // Insertion boundary follows the cursor within the row: the top half of a
-    // row means "before it", the bottom half "after it". Rows are 30px tall
-    // with 4px spacing, so the pitch is 34.
-    var local = drawerColumn.mapFromItem(handle, mouseX, mouseY)
-    var count = root.hiddenIds.length
-    var pitch = 34
-    var rowIndex = Math.floor(local.y / pitch)
-    var index
-    if (rowIndex < 0) index = 0
-    else if (rowIndex >= count) index = count
-    else index = (local.y - rowIndex * pitch) < 15 ? rowIndex : rowIndex + 1
-    if (index > count) index = count
-    root.dragTargetIndex = index
-    // The ghost snaps to the slot it will land in so the drop position is
-    // obvious instead of trailing the cursor.
-    root.dragGhostY = Math.max(0, Math.min(count - 1, index)) * pitch
+    var count = root.drawerVisibleIds.length
+    if (root.viewMode === "grid") {
+      // Index follows the cursor in row-major reading order across the Flow,
+      // using the stretched cell size so the ghost lands in the right slot.
+      var cell = root.gridCellW + root.tileGap
+      var cols = root.gridCols
+      var local = drawerGrid.mapFromItem(handle, mouseX, mouseY)
+      var col = Math.floor(local.x / cell)
+      var row = Math.floor(local.y / cell)
+      if (col < 0) col = 0
+      if (col > cols - 1) col = cols - 1
+      if (row < 0) row = 0
+      var index = row * cols + col
+      if (index > count) index = count
+      root.dragTargetIndex = index
+      root.dragGhostX = col * cell
+      root.dragGhostY = row * cell
+    } else {
+      root.dragGhostX = 0
+      var llocal = drawerColumn.mapFromItem(handle, mouseX, mouseY)
+      var pitch = 34
+      var rowIndex = Math.floor(llocal.y / pitch)
+      var index2
+      if (rowIndex < 0) index2 = 0
+      else if (rowIndex >= count) index2 = count
+      else index2 = (llocal.y - rowIndex * pitch) < 15 ? rowIndex : rowIndex + 1
+      if (index2 > count) index2 = count
+      root.dragTargetIndex = index2
+      // The ghost snaps to the slot it will land in so the drop position is
+      // obvious instead of trailing the cursor.
+      root.dragGhostY = Math.max(0, Math.min(count - 1, index2)) * pitch
+    }
   }
 
   function dragEnd() {
@@ -450,7 +612,7 @@ BarWidget {
     owner: root
     bar: root.bar
     open: root.menuOpen
-    contentWidth: menuPopup.fittedContentWidth(Style.space(300))
+    contentWidth: root.drawerContentWidth()
     contentHeight: menuPopup.fittedContentHeight(menuColumn.implicitHeight, Style.space(480))
 
     Column {
@@ -458,62 +620,92 @@ BarWidget {
       anchors.fill: parent
       spacing: Style.space(6)
 
-      Item {
-        id: headerRow
-        width: menuColumn.width
-        implicitHeight: 22
+       Item {
+         id: headerRow
+         width: menuColumn.width
+         implicitHeight: 22
 
-        Text {
-          anchors.verticalCenter: parent.verticalCenter
-          anchors.left: parent.left
-          anchors.right: backButton.visible ? backButton.left : (penButton.visible ? penButton.left : parent.right)
-          anchors.rightMargin: Style.space(8)
-          text: root.manageMode ? "Edit plugins" : "Plugin Drawer"
-          color: root.bar ? root.bar.foreground : Color.foreground
-          font.family: root.bar ? root.bar.fontFamily : Style.font.family
-          font.pixelSize: Style.font.body
-          font.bold: true
-          elide: Text.ElideRight
-        }
+         Text {
+           anchors.verticalCenter: parent.verticalCenter
+           anchors.left: parent.left
+            anchors.right: backButton.visible ? backButton.left : (viewModeButton.visible ? viewModeButton.left : parent.right)
+           anchors.rightMargin: Style.space(8)
+           text: root.manageMode ? "Edit plugins" : "Plugin Drawer"
+           color: root.fg
+           font.family: root.ffont
+           font.pixelSize: Style.font.body
+           font.bold: true
+           elide: Text.ElideRight
+         }
 
-        Button {
-          id: penButton
-          visible: !root.manageMode
-          anchors.right: parent.right
-          anchors.verticalCenter: parent.verticalCenter
-          text: "\uf040"
-          foreground: root.bar ? root.bar.foreground : Color.foreground
-          horizontalPadding: 8
-          verticalPadding: 3
-          fontSize: Style.font.bodySmall
-          onClicked: {
-            root.pendingDrawerIds = root.configuredIds.slice()
-            root.manageMode = true
+          Button {
+            id: viewModeButton
+            visible: !root.manageMode
+            anchors.right: eyeButton.left
+            anchors.rightMargin: Style.space(4)
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.viewMode === "grid" ? "\uf0ca" : "\uf009"
+            tooltipText: root.viewMode === "grid" ? "Switch to list view" : "Switch to grid view"
+            foreground: root.fg
+            horizontalPadding: 8
+            verticalPadding: 3
+            fontSize: Style.font.bodySmall
+            onClicked: root.viewMode = root.viewMode === "grid" ? "list" : "grid"
           }
-        }
 
-        Button {
-          id: backButton
-          visible: root.manageMode
-          anchors.right: parent.right
-          anchors.verticalCenter: parent.verticalCenter
-          text: "\u2039 Back"
-          foreground: root.bar ? root.bar.foreground : Color.foreground
-          horizontalPadding: 8
-          verticalPadding: 3
-          fontSize: Style.font.bodySmall
-          onClicked: root.leaveManageMode()
-        }
-      }
+          Button {
+            id: eyeButton
+            visible: !root.manageMode
+            anchors.right: penButton.left
+            anchors.rightMargin: Style.space(4)
+            anchors.verticalCenter: parent.verticalCenter
+            text: root.showHidden ? "\uf06e" : "\uf070"
+            tooltipText: root.showHidden ? "Hide hidden plugins" : "Show hidden plugins"
+            foreground: root.showHidden ? Color.accent : root.fg
+            horizontalPadding: 8
+            verticalPadding: 3
+            fontSize: Style.font.bodySmall
+            onClicked: root.showHidden = !root.showHidden
+          }
+
+          Button {
+            id: penButton
+            visible: !root.manageMode
+            anchors.right: parent.right
+            anchors.verticalCenter: parent.verticalCenter
+            text: "\uf040"
+            foreground: root.fg
+            horizontalPadding: 8
+            verticalPadding: 3
+            fontSize: Style.font.bodySmall
+            onClicked: {
+              root.pendingDrawerIds = root.configuredIds.slice()
+              root.manageMode = true
+            }
+          }
+
+         Button {
+           id: backButton
+           visible: root.manageMode
+           anchors.right: parent.right
+           anchors.verticalCenter: parent.verticalCenter
+           text: "\u2039 Back"
+           foreground: root.fg
+           horizontalPadding: 8
+           verticalPadding: 3
+           fontSize: Style.font.bodySmall
+           onClicked: root.leaveManageMode()
+         }
+       }
 
       Flickable {
         id: bodyFlick
         width: menuColumn.width
         height: root.manageMode
           ? Math.min(manageColumn.implicitHeight, Math.max(80, Style.space(300)))
-          : drawerColumn.implicitHeight
+          : (root.viewMode === "grid" ? drawerGrid.implicitHeight : drawerColumn.implicitHeight)
         contentWidth: width
-        contentHeight: root.manageMode ? manageColumn.implicitHeight : drawerColumn.implicitHeight
+        contentHeight: root.manageMode ? manageColumn.implicitHeight : (root.viewMode === "grid" ? drawerGrid.implicitHeight : drawerColumn.implicitHeight)
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         flickableDirection: Flickable.VerticalFlick
@@ -523,25 +715,26 @@ BarWidget {
 
         Column {
           id: drawerColumn
-          visible: !root.manageMode
+          visible: !root.manageMode && root.viewMode === "list"
           width: bodyFlick.width
           spacing: Style.space(4)
 
           Repeater {
-            model: root.hiddenIds
+            model: root.drawerDisplayIds
 
             delegate: Item {
               id: drow
-              required property string modelData
+              required property var modelData
               width: drawerColumn.width
               implicitHeight: 30
 
-              readonly property string rowId: drow.modelData
+              readonly property string rowId: drow.modelData.id
+              readonly property bool isHiddenItem: drow.modelData.hidden
               property real pressX: 0
               property real pressY: 0
               property bool dragged: false
 
-              opacity: root.dragId === drow.rowId ? 0.5 : 1.0
+              opacity: (root.dragId === drow.rowId ? 0.4 : 1.0) * (drow.isHiddenItem ? 0.5 : 1.0)
 
               Rectangle {
                 anchors.fill: parent
@@ -549,7 +742,7 @@ BarWidget {
                 color: root.dragActive && root.dragTargetIndex === drow.index
                   ? Util.alpha(Color.accent, 0.18)
                   : (!root.dragActive && drowMouse.containsMouse
-                      ? Style.hoverFillFor(root.bar ? root.bar.foreground : Color.foreground, root.bar ? root.bar.foreground : Color.foreground)
+                      ? Style.hoverFillFor(root.fg, root.fg)
                       : "transparent")
               }
 
@@ -570,8 +763,8 @@ BarWidget {
                 anchors.leftMargin: Style.space(8)
                 anchors.rightMargin: Style.space(8)
                 text: root.displayName(drow.rowId)
-                color: root.bar ? root.bar.foreground : Color.foreground
-                font.family: root.bar ? root.bar.fontFamily : Style.font.family
+                color: root.fg
+                font.family: root.ffont
                 font.pixelSize: Style.font.bodySmall
                 elide: Text.ElideRight
               }
@@ -585,6 +778,7 @@ BarWidget {
 
                 onPressed: function(mouse) {
                   drow.dragged = false
+                  if (drow.isHiddenItem || root.showHidden) return
                   drow.pressX = mouse.x
                   drow.pressY = mouse.y
                   root.dragStart(drow.rowId)
@@ -606,7 +800,10 @@ BarWidget {
                 }
 
                 onClicked: {
-                  if (!drow.dragged) root.openWidget(drow.rowId)
+                  if (!drow.dragged) {
+                    if (drow.isHiddenItem) root.toggleHiddenView(drow.rowId)
+                    else root.openWidget(drow.rowId)
+                  }
                 }
               }
             }
@@ -616,23 +813,164 @@ BarWidget {
             width: drawerColumn.width
             implicitHeight: Style.space(10)
 
-            Rectangle {
-              anchors.top: parent.top
-              anchors.left: parent.left
-              anchors.right: parent.right
-              height: 3
-              radius: 1.5
-              color: Color.accent
-              visible: root.dragActive && !root.dragShowZone && root.dragTargetIndex === root.hiddenIds.length
+              Rectangle {
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                height: 3
+                radius: 1.5
+                color: Color.accent
+                visible: root.dragActive && !root.dragShowZone && root.dragTargetIndex === root.drawerVisibleIds.length
+              }
+            }
+
+            Text {
+              visible: root.configuredIds.length === 0
+              width: drawerColumn.width
+              text: "No widgets hidden."
+              color: Qt.darker(root.fg, 1.5)
+              font.family: root.ffont
+              font.pixelSize: Style.font.bodySmall
+              font.italic: true
+            }
+        }
+
+        Flow {
+          id: drawerGrid
+          visible: !root.manageMode && root.viewMode === "grid"
+          width: bodyFlick.width
+          spacing: root.tileGap
+          flow: Flow.LeftToRight
+
+          Repeater {
+            model: root.drawerDisplayIds
+
+            delegate: Item {
+              id: gtile
+              required property var modelData
+              width: root.gridCellW
+              height: root.tileHeight
+
+              readonly property string rowId: gtile.modelData.id
+              readonly property bool isHiddenItem: gtile.modelData.hidden
+              readonly property bool isDragTarget: root.dragActive && !root.dragShowZone && root.dragId !== gtile.rowId && root.dragTargetIndex === gtile.index
+              property real pressX: 0
+              property real pressY: 0
+              property bool dragged: false
+
+              opacity: (root.dragId === gtile.rowId ? 0.4 : 1.0) * (gtile.isHiddenItem ? 0.5 : 1.0)
+
+              Rectangle {
+                anchors.fill: parent
+                radius: Style.cornerRadius
+                color: gtile.isDragTarget
+                  ? Util.alpha(Color.accent, 0.18)
+                  : (gtileMouse.containsMouse ? Style.hoverFillFor(root.fg, root.fg) : "transparent")
+              }
+
+              Rectangle {
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                height: 3
+                radius: 1.5
+                color: Color.accent
+                visible: gtile.isDragTarget
+              }
+
+              Text {
+                id: label
+                anchors.horizontalCenter: parent.horizontalCenter
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: Style.space(6)
+                width: parent.width - Style.space(8)
+                horizontalAlignment: Text.AlignHCenter
+                text: root.displayName(gtile.rowId)
+                color: root.fg
+                font.family: root.ffont
+                font.pixelSize: Style.font.caption
+                elide: Text.ElideRight
+                wrapMode: Text.Wrap
+                maximumLineCount: 2
+              }
+
+              Loader {
+                id: preview
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.bottom: label.top
+                anchors.bottomMargin: Style.space(2)
+                clip: true
+                sourceComponent: root.viewMode === "grid" ? root.widgetComponent(gtile.rowId) : null
+                onLoaded: {
+                  var w = preview.item
+                  if (!w) return
+                  if ("bar" in w) w.bar = root.bar
+                  if ("moduleName" in w) w.moduleName = gtile.rowId
+                  if ("settings" in w) w.settings = root.defaultsFor(gtile.rowId)
+                }
+              }
+
+              Text {
+                id: gtileGlyph
+                visible: preview.status !== Loader.Ready || preview.item === null
+                anchors.fill: preview
+                horizontalAlignment: Text.AlignHCenter
+                verticalAlignment: Text.AlignVCenter
+                text: root.pluginGlyph(gtile.rowId)
+                color: root.fg
+                font.family: root.ffont
+                font.pixelSize: Style.space(22)
+                font.bold: true
+              }
+
+              MouseArea {
+                id: gtileMouse
+                anchors.fill: parent
+                hoverEnabled: true
+                preventStealing: true
+                cursorShape: root.dragStarted ? Qt.ClosedHandCursor : Qt.OpenHandCursor
+
+                onPressed: function(mouse) {
+                  gtile.dragged = false
+                  if (gtile.isHiddenItem || root.showHidden) return
+                  gtile.pressX = mouse.x
+                  gtile.pressY = mouse.y
+                  root.dragStart(gtile.rowId)
+                }
+
+                onPositionChanged: function(mouse) {
+                  if (!(mouse.buttons & Qt.LeftButton)) return
+                  if (!gtile.dragged && (Math.abs(mouse.x - gtile.pressX) + Math.abs(mouse.y - gtile.pressY)) >= root.dragThreshold)
+                    gtile.dragged = true
+                  if (gtile.dragged) root.dragMove(gtileMouse, mouse.x, mouse.y)
+                }
+
+                onReleased: {
+                  if (root.dragActive) root.dragEnd()
+                }
+
+                onCanceled: {
+                  root.dragCancel()
+                }
+
+                onClicked: {
+                  if (!gtile.dragged) {
+                    if (gtile.isHiddenItem) root.toggleHiddenView(gtile.rowId)
+                    else root.openWidget(gtile.rowId)
+                  }
+                }
+              }
             }
           }
 
           Text {
-            visible: root.hiddenIds.length === 0
-            width: drawerColumn.width
+            visible: root.configuredIds.length === 0
+            width: drawerGrid.width
             text: "No widgets hidden."
-            color: Qt.darker(root.bar ? root.bar.foreground : Color.foreground, 1.5)
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            color: Qt.darker(root.fg, 1.5)
+            font.family: root.ffont
             font.pixelSize: Style.font.bodySmall
             font.italic: true
           }
@@ -730,6 +1068,18 @@ BarWidget {
                 Button {
                   width: 24
                   height: 24
+                  visible: root.configuredIds.indexOf(mrow.rowId) !== -1
+                  text: root.isHiddenView(mrow.rowId) ? "\uf070" : "\uf06e"
+                  tooltipText: root.isHiddenView(mrow.rowId) ? "Hidden — click to show in drawer" : "Hide from drawer"
+                  foreground: root.isHiddenView(mrow.rowId) ? Color.accent : (root.bar ? root.bar.foreground : Color.foreground)
+                  horizontalPadding: 0
+                  verticalPadding: 0
+                  onClicked: root.toggleHiddenView(mrow.rowId)
+                }
+
+                Button {
+                  width: 24
+                  height: 24
                   text: "\uf00c"
                   tooltipText: mrow.enabled ? "Already enabled" : "Enable plugin"
                   foreground: root.bar ? root.bar.foreground : Color.foreground
@@ -783,8 +1133,8 @@ BarWidget {
           z: 20
           x: root.dragGhostX
           y: root.dragGhostY
-          width: drawerColumn.width
-          height: 30
+          width: root.viewMode === "grid" ? root.gridCellW : drawerColumn.width
+          height: root.viewMode === "grid" ? root.tileHeight : 30
           radius: Math.max(2, Style.cornerRadius)
           color: Util.alpha(Color.accent, 0.25)
           border.width: 1.5
@@ -795,10 +1145,11 @@ BarWidget {
             anchors.fill: parent
             anchors.leftMargin: Style.space(8)
             anchors.rightMargin: Style.space(8)
+            horizontalAlignment: root.viewMode === "grid" ? Text.AlignHCenter : Text.AlignLeft
             verticalAlignment: Text.AlignVCenter
             text: root.displayName(root.dragId)
-            color: root.bar ? root.bar.foreground : Color.foreground
-            font.family: root.bar ? root.bar.fontFamily : Style.font.family
+            color: root.fg
+            font.family: root.ffont
             font.pixelSize: Style.font.bodySmall
             font.bold: true
             elide: Text.ElideRight

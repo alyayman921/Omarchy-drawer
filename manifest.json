@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "3lymn.plugin-drawer",
   "name": "Plugin Drawer",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "author": "Aly Sarhan",
   "license": "MIT",
-  "description": "Collapse chosen bar plugins into a tray-style drawer, with the ability to remove, disable and enable plugins within",
+    "description": "Collapse chosen bar plugins into a tray-style drawer. Grid and list views with drag-and-drop reordering and a live preview of each plugin's bar icon; the grid stretches to fill the drawer width and the drawer adapts to the screen. Hide/unhide plugins via an eye toggle, with a show-hidden reveal in the drawer",
   "kinds": [
     "bar-widget"
   ],
@@ -14,7 +14,7 @@
   },
   "barWidget": {
     "displayName": "Plugin Drawer",
-    "description": "Collapse chosen bar plugins into a tray-style drawer, with the ability to remove, disable and enable plugins within",
+  "description": "Collapse chosen bar plugins into a tray-style drawer. Grid and list views with drag-and-drop reordering and a live preview of each plugin's bar icon; the grid stretches to fill the drawer width and the drawer adapts to the screen. Hide/unhide plugins via an eye toggle, with a show-hidden reveal in the drawer",
     "category": "Status",
     "allowMultiple": false,
     "defaultSection": "center",
