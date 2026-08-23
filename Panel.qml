@@ -206,18 +206,19 @@ BarWidget {
   readonly property color fg: root.bar ? root.bar.foreground : Color.foreground
   readonly property string ffont: root.bar ? root.bar.fontFamily : Style.font.family
 
+  // Window scaling is a sub-setting on the drawer entry (`scale` now expressed
+  // as 10%–100% of the screen width); the sizing math is unchanged, just the
+  // allowed range. Default 50% matches the previous behaviour.
+  property real windowScale: Math.max(0.1, Math.min(1.0, root.entrySetting("scale", 0.5)))
+  property int gridColumnSetting: Math.max(1, Math.round(root.entrySetting("gridColumns", 3)))
+
   readonly property int tileSize: Style.space(64)
   readonly property int tileGap: Style.space(10)
   readonly property int tileHeight: Style.space(74)
 
   // Columns and stretched cell width derived from the actual grid width, so the
   // tiles fill the row instead of leaving a gap on the right.
-  readonly property int gridCols: {
-    var w = drawerGrid.width
-    if (w <= 0) return 3
-    var cols = Math.floor((w + root.tileGap) / (root.tileSize + root.tileGap))
-    return cols < 1 ? 1 : cols
-  }
+  readonly property int gridCols: Math.max(1, root.gridColumnSetting)
   readonly property real gridCellW: {
     var cols = root.gridCols
     if (cols < 1) cols = 1
@@ -266,7 +267,9 @@ BarWidget {
     var out = []
     var cfg = root.configuredIds
     for (var j = 0; j < cfg.length; j++) {
-      if (!hv[cfg[j]]) out.push(cfg[j])
+      var cid = cfg[j]
+      if (!root.registryWidgets[cid]) continue
+      if (!hv[cid]) out.push(cid)
     }
     return out
   }
@@ -282,6 +285,7 @@ BarWidget {
       var cfgSet = {}
       for (var c = 0; c < root.configuredIds.length; c++) cfgSet[root.configuredIds[c]] = true
       for (var k = 0; k < hv.length; k++) {
+        if (!root.registryWidgets[hv[k]]) continue
         if (cfgSet[hv[k]]) out.push({ id: hv[k], hidden: true })
       }
     }
@@ -327,6 +331,64 @@ BarWidget {
     return name.charAt(0).toUpperCase()
   }
 
+  // Generic reader for a sub-setting stored on the drawer's own entry in the
+  // bar layout config.
+  function entrySetting(name, fallback) {
+    var rev = root.manageRevision
+    void rev
+    var shell = root.bar && root.bar.shell
+    var config = shell ? shell.shellConfig : null
+    if (config && config.bar && config.bar.layout) {
+      var sections = ["left", "center", "right"]
+      for (var s = 0; s < sections.length; s++) {
+        var arr = config.bar.layout[sections[s]]
+        if (!Array.isArray(arr)) continue
+        for (var i = 0; i < arr.length; i++) {
+          if (arr[i] && String(arr[i].id || "") === root.moduleName) {
+            if (arr[i] && name in arr[i] && arr[i][name] !== undefined && arr[i][name] !== null)
+              return arr[i][name]
+            return fallback
+          }
+        }
+      }
+    }
+    return fallback
+  }
+
+  function persistEntrySetting(name, value) {
+    var id = root.moduleName
+    root.mutateConfig(function(c) {
+      if (!c || !c.bar || !c.bar.layout) return
+      var sections = ["left", "center", "right"]
+      for (var s = 0; s < sections.length; s++) {
+        var arr = c.bar.layout[sections[s]]
+        if (!Array.isArray(arr)) continue
+        for (var k = 0; k < arr.length; k++) {
+          if (arr[k] && String(arr[k].id || "") === id) {
+            arr[k][name] = value
+            return
+          }
+        }
+      }
+    })
+  }
+
+  function setGridColumns(n) {
+    n = Math.max(1, Math.min(8, Math.round(n)))
+    if (n === root.gridColumnSetting) return
+    root.gridColumnSetting = n
+    root.persistEntrySetting("gridColumns", n)
+    root.manageRevision++
+  }
+
+  function setWindowScale(n) {
+    n = Math.max(0.1, Math.min(1.0, Math.round(n * 100) / 100))
+    if (Math.abs(n - root.windowScale) < 0.001) return
+    root.windowScale = n
+    root.persistEntrySetting("scale", n)
+    root.manageRevision++
+  }
+
   // The component the widget renders in the bar. Used as the tile's live
   // preview so the grid shows the plugin's real bar appearance, falling back
   // to the first-letter monogram when there is no component.
@@ -340,9 +402,9 @@ BarWidget {
   function drawerContentWidth() {
     var avail = menuPopup.availableCardWidth
     if (!avail || avail <= 0) avail = Style.space(560)
-    if (root.viewMode === "grid")
-      return menuPopup.fittedContentWidth(Math.max(avail, Style.space(560)), Math.round(avail * 0.72))
-    return menuPopup.fittedContentWidth(Style.space(300))
+    var w = avail * root.windowScale
+    if (w < Style.space(280)) w = Style.space(280)
+    return menuPopup.fittedContentWidth(w)
   }
 
   function isRemovePending(id) {
@@ -625,18 +687,116 @@ BarWidget {
          width: menuColumn.width
          implicitHeight: 22
 
-         Text {
-           anchors.verticalCenter: parent.verticalCenter
-           anchors.left: parent.left
-            anchors.right: backButton.visible ? backButton.left : (viewModeButton.visible ? viewModeButton.left : parent.right)
-           anchors.rightMargin: Style.space(8)
-           text: root.manageMode ? "Edit plugins" : "Plugin Drawer"
-           color: root.fg
-           font.family: root.ffont
-           font.pixelSize: Style.font.body
-           font.bold: true
-           elide: Text.ElideRight
-         }
+          Row {
+            id: titleGroup
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.left: parent.left
+            anchors.right: backButton.visible ? backButton.left : (penButton.visible ? penButton.left : (eyeButton.visible ? eyeButton.left : (viewModeButton.visible ? viewModeButton.left : parent.right)))
+            anchors.rightMargin: Style.space(8)
+            spacing: Style.space(10)
+
+            Text {
+              id: titleText
+              text: root.manageMode ? "Edit plugins" : "Plugin Drawer"
+              color: root.fg
+              font.family: root.ffont
+              font.pixelSize: Style.font.body
+              font.bold: true
+              elide: Text.ElideRight
+            }
+
+            // Drawer sub-settings, shown next to the title only in the edit tab.
+              Row {
+                id: manageControls
+                visible: root.manageMode
+                height: parent.height
+                spacing: Style.space(10)
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "Grid"
+                  color: root.fg
+                  font.family: root.ffont
+                  font.pixelSize: Style.font.caption
+                }
+                Row {
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(4)
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(16)
+                    horizontalAlignment: Text.AlignHCenter
+                    text: String(root.gridColumnSetting)
+                    color: root.fg
+                    font.family: root.ffont
+                    font.pixelSize: Style.font.caption
+                  }
+                  Column {
+                    spacing: 1
+                    Button {
+                      width: 14
+                      height: 11
+                      text: "+"
+                      horizontalPadding: 0
+                      verticalPadding: 0
+                      fontSize: 9
+                      onClicked: root.setGridColumns(root.gridColumnSetting + 1)
+                    }
+                    Button {
+                      width: 14
+                      height: 11
+                      text: "-"
+                      horizontalPadding: 0
+                      verticalPadding: 0
+                      fontSize: 9
+                      onClicked: root.setGridColumns(root.gridColumnSetting - 1)
+                    }
+                  }
+                }
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  text: "Scale"
+                  color: root.fg
+                  font.family: root.ffont
+                  font.pixelSize: Style.font.caption
+                }
+                Row {
+                  anchors.verticalCenter: parent.verticalCenter
+                  spacing: Style.space(4)
+                  Text {
+                    anchors.verticalCenter: parent.verticalCenter
+                    width: Style.space(34)
+                    horizontalAlignment: Text.AlignHCenter
+                    text: Math.round(root.windowScale * 100) + "%"
+                    color: root.fg
+                    font.family: root.ffont
+                    font.pixelSize: Style.font.caption
+                  }
+                  Column {
+                    spacing: 1
+                    Button {
+                      width: 14
+                      height: 11
+                      text: "+"
+                      horizontalPadding: 0
+                      verticalPadding: 0
+                      fontSize: 9
+                      onClicked: root.setWindowScale(root.windowScale + 0.1)
+                    }
+                    Button {
+                      width: 14
+                      height: 11
+                      text: "-"
+                      horizontalPadding: 0
+                      verticalPadding: 0
+                      fontSize: 9
+                      onClicked: root.setWindowScale(root.windowScale - 0.1)
+                    }
+                  }
+                }
+              }
+          }
 
           Button {
             id: viewModeButton
@@ -1125,6 +1285,7 @@ BarWidget {
               }
             }
           }
+
         }
 
         Rectangle {
