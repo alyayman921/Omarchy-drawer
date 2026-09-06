@@ -682,120 +682,131 @@ BarWidget {
       anchors.fill: parent
       spacing: Style.space(6)
 
-       Item {
-         id: headerRow
-         width: menuColumn.width
-         implicitHeight: 22
+Item {
+          id: headerRow
+          width: menuColumn.width
+          implicitHeight: 32
 
           Row {
             id: titleGroup
+            visible: !root.manageMode
             anchors.verticalCenter: parent.verticalCenter
             anchors.left: parent.left
-            anchors.right: backButton.visible ? backButton.left : (penButton.visible ? penButton.left : (eyeButton.visible ? eyeButton.left : (viewModeButton.visible ? viewModeButton.left : parent.right)))
+            anchors.right: penButton.left
             anchors.rightMargin: Style.space(8)
             spacing: Style.space(10)
+            clip: true
 
             Text {
               id: titleText
-              text: root.manageMode ? "Edit plugins" : "Plugin Drawer"
+              anchors.verticalCenter: parent.verticalCenter
+              text: "Plugin Drawer"
               color: root.fg
               font.family: root.ffont
               font.pixelSize: Style.font.body
               font.bold: true
               elide: Text.ElideRight
             }
+          }
 
-            // Drawer sub-settings, shown next to the title only in the edit tab.
-              Row {
-                id: manageControls
-                visible: root.manageMode
-                height: parent.height
-                spacing: Style.space(10)
+          Row {
+            id: manageControls
+            visible: root.manageMode
+            anchors.left: parent.left
+            anchors.verticalCenter: parent.verticalCenter
+            spacing: Style.space(12)
 
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "Grid"
-                  color: root.fg
-                  font.family: root.ffont
-                  font.pixelSize: Style.font.caption
-                }
-                Row {
-                  anchors.verticalCenter: parent.verticalCenter
-                  spacing: Style.space(4)
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(16)
-                    horizontalAlignment: Text.AlignHCenter
-                    text: String(root.gridColumnSetting)
-                    color: root.fg
-                    font.family: root.ffont
-                    font.pixelSize: Style.font.caption
-                  }
-                  Column {
-                    spacing: 1
-                    Button {
-                      width: 14
-                      height: 11
-                      text: "+"
-                      horizontalPadding: 0
-                      verticalPadding: 0
-                      fontSize: 9
-                      onClicked: root.setGridColumns(root.gridColumnSetting + 1)
-                    }
-                    Button {
-                      width: 14
-                      height: 11
-                      text: "-"
-                      horizontalPadding: 0
-                      verticalPadding: 0
-                      fontSize: 9
-                      onClicked: root.setGridColumns(root.gridColumnSetting - 1)
-                    }
-                  }
-                }
+            Row {
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(3)
 
-                Text {
-                  anchors.verticalCenter: parent.verticalCenter
-                  text: "Scale"
-                  color: root.fg
-                  font.family: root.ffont
-                  font.pixelSize: Style.font.caption
-                }
-                Row {
-                  anchors.verticalCenter: parent.verticalCenter
-                  spacing: Style.space(4)
-                  Text {
-                    anchors.verticalCenter: parent.verticalCenter
-                    width: Style.space(34)
-                    horizontalAlignment: Text.AlignHCenter
-                    text: Math.round(root.windowScale * 100) + "%"
-                    color: root.fg
-                    font.family: root.ffont
-                    font.pixelSize: Style.font.caption
-                  }
-                  Column {
-                    spacing: 1
-                    Button {
-                      width: 14
-                      height: 11
-                      text: "+"
-                      horizontalPadding: 0
-                      verticalPadding: 0
-                      fontSize: 9
-                      onClicked: root.setWindowScale(root.windowScale + 0.1)
-                    }
-                    Button {
-                      width: 14
-                      height: 11
-                      text: "-"
-                      horizontalPadding: 0
-                      verticalPadding: 0
-                      fontSize: 9
-                      onClicked: root.setWindowScale(root.windowScale - 0.1)
-                    }
-                  }
-                }
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Grid"
+                color: root.fg
+                font.family: root.ffont
+                font.pixelSize: Style.font.caption
               }
+
+              Button {
+                width: 20
+                height: 18
+                text: "-"
+                horizontalPadding: 0
+                verticalPadding: 0
+                fontSize: 12
+                tooltipText: "Smaller grid"
+                onClicked: root.setGridColumns(root.gridColumnSetting - 1)
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(44)
+                horizontalAlignment: Text.AlignHCenter
+                text: root.gridColumnSetting + "x" + root.gridColumnSetting
+                color: root.fg
+                font.family: root.ffont
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Button {
+                width: 20
+                height: 18
+                text: "+"
+                horizontalPadding: 0
+                verticalPadding: 0
+                fontSize: 12
+                tooltipText: "Larger grid"
+                onClicked: root.setGridColumns(root.gridColumnSetting + 1)
+              }
+            }
+
+            Row {
+              anchors.verticalCenter: parent.verticalCenter
+              spacing: Style.space(3)
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                text: "Window"
+                color: root.fg
+                font.family: root.ffont
+                font.pixelSize: Style.font.caption
+              }
+
+              Button {
+                width: 20
+                height: 18
+                text: "-"
+                horizontalPadding: 0
+                verticalPadding: 0
+                fontSize: 12
+                tooltipText: "Smaller window"
+                onClicked: root.setWindowScale(root.windowScale - 0.1)
+              }
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                width: Style.space(40)
+                horizontalAlignment: Text.AlignHCenter
+                text: Math.round(root.windowScale * 100) + "%"
+                color: root.fg
+                font.family: root.ffont
+                font.pixelSize: Style.font.caption
+                font.bold: true
+              }
+
+              Button {
+                width: 20
+                height: 18
+                text: "+"
+                horizontalPadding: 0
+                verticalPadding: 0
+                fontSize: 12
+                tooltipText: "Larger window"
+                onClicked: root.setWindowScale(root.windowScale + 0.1)
+              }
+            }
           }
 
           Button {
@@ -830,7 +841,6 @@ BarWidget {
 
           Button {
             id: penButton
-            visible: !root.manageMode
             anchors.right: parent.right
             anchors.verticalCenter: parent.verticalCenter
             text: "\uf040"
@@ -840,25 +850,12 @@ BarWidget {
             fontSize: Style.font.bodySmall
             onClicked: {
               root.pendingDrawerIds = root.configuredIds.slice()
-              root.manageMode = true
+              root.manageMode = !root.manageMode
             }
           }
+        }
 
-         Button {
-           id: backButton
-           visible: root.manageMode
-           anchors.right: parent.right
-           anchors.verticalCenter: parent.verticalCenter
-           text: "\u2039 Back"
-           foreground: root.fg
-           horizontalPadding: 8
-           verticalPadding: 3
-           fontSize: Style.font.bodySmall
-           onClicked: root.leaveManageMode()
-         }
-       }
-
-      Flickable {
+       Flickable {
         id: bodyFlick
         width: menuColumn.width
         height: root.manageMode
