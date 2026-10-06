@@ -23,29 +23,31 @@ BarWidget {
   readonly property var registryWidgets: root.bar && root.bar.barWidgetRegistry
     ? root.bar.barWidgetRegistry.widgets : ({})
 
-  // Raw configured list, read from the live in-memory config so rapid
-  // successive changes never read a stale `settings` snapshot. Falls back to
-  // manifest defaults when the entry has no `widgets` key yet.
+  // Since Omarchy 4.0.3 ("Quattro"), a bar-widget-kind plugin's `bar.shell` is
+  // a capability-scoped PluginShellApi that no longer exposes `shellConfig`
+  // (see Omarchy-drawer#2). `bar.layoutConfig`, however, is unconditionally
+  // handed to every bar widget (first- or third-party alike) as a read-only
+  // snapshot of the whole bar's left/center/right entries, so it is the one
+  // reliable source left for inspecting *other* widgets' placement. Falls
+  // back to the old `shellConfig` path for hosts that still provide it.
+  function barLayoutSections() {
+    var cfg = root.bar ? root.bar.layoutConfig : null
+    if (cfg && (Array.isArray(cfg.left) || Array.isArray(cfg.center) || Array.isArray(cfg.right)))
+      return cfg
+    var shell = root.bar && root.bar.shell
+    var config = shell ? shell.shellConfig : null
+    return config && config.bar && config.bar.layout ? config.bar.layout : null
+  }
+
+  // Raw configured list. Read straight off this plugin's own injected
+  // `settings` (always kept current by the host regardless of capability
+  // scoping) instead of re-scanning a config object that may not be reachable
+  // any more. Falls back to manifest defaults when the entry has no
+  // `widgets` key yet.
   readonly property var configuredIds: {
     var rev = root.manageRevision
     void rev
-    var list = null
-    var shell = root.bar && root.bar.shell
-    var config = shell ? shell.shellConfig : null
-    if (config && config.bar && config.bar.layout) {
-      var sections = ["left", "center", "right"]
-      for (var s = 0; s < sections.length; s++) {
-        var arr = config.bar.layout[sections[s]]
-        if (!Array.isArray(arr)) continue
-        for (var i = 0; i < arr.length; i++) {
-          if (arr[i] && String(arr[i].id || "") === root.moduleName) {
-            if (Array.isArray(arr[i].widgets)) list = arr[i].widgets
-            break
-          }
-        }
-        if (list) break
-      }
-    }
+    var list = Array.isArray(root.settings.widgets) ? root.settings.widgets : null
     if (!Array.isArray(list)) {
       var defaults = root.defaultsFor(root.moduleName)
       list = defaults && Array.isArray(defaults.widgets) ? defaults.widgets : []
@@ -77,18 +79,53 @@ BarWidget {
   // plugins, then the rest; alphabetical within each group. Plugins that can't
   // sit on the bar (custom, non bar-widgets) come next, and first-party
   // plugins (which can't be removed) are pushed to the very bottom.
+  //
+  // True when the host still exposes the full plugin catalog. Since Omarchy
+  // 4.0.3, a bar-widget-kind plugin's pluginRegistry facade
+  // (PluginRegistryApi) is scoped to itself only (Omarchy-drawer#2): its
+  // `installedPlugins` is always a plain object, so a naive truthiness check
+  // never falls back — it just silently contains zero or one entries. This
+  // checks the actual contents instead of the container.
+  readonly property bool hasFullRegistry: {
+    var reg = root.bar && root.bar.shell && root.bar.shell.pluginRegistry
+    var installed = reg && reg.installedPlugins ? reg.installedPlugins : null
+    if (!installed) return false
+    var keys = Object.keys(installed)
+    return !(keys.length <= 1 && (keys.length === 0 || keys[0] === root.moduleName))
+  }
+
   readonly property var allPlugins: {
     var hidden = {}
     var configured = root.configuredIds
     for (var h = 0; h < configured.length; h++) hidden[configured[h]] = true
-    var reg = root.bar && root.bar.shell && root.bar.shell.pluginRegistry
-    var installed = reg && reg.installedPlugins ? reg.installedPlugins : null
     var out = []
-    if (installed) {
+    if (root.hasFullRegistry) {
+      var installed = root.bar.shell.pluginRegistry.installedPlugins
       for (var id in installed) if (id !== root.moduleName) out.push(id)
     } else {
-      var widgets = root.registryWidgets
-      for (var wid in widgets) if (wid !== root.moduleName) out.push(wid)
+      // Sandboxed bar-widget context: the full catalog isn't reachable, so
+      // fall back to widgets already sitting in the bar's public layout
+      // snapshot (always exposed via bar.layoutConfig). This restores the
+      // "which currently-on-bar widgets are hidden" checklist, though
+      // discovering installed-but-not-placed plugins stays unavailable here.
+      var sections = root.barLayoutSections()
+      var seen = {}
+      var names = ["left", "center", "right"]
+      if (sections) {
+        for (var s = 0; s < names.length; s++) {
+          var arr = sections[names[s]]
+          if (!Array.isArray(arr)) continue
+          for (var i = 0; i < arr.length; i++) {
+            var wid = arr[i] && String(arr[i].id || "")
+            if (wid && wid !== root.moduleName && !seen[wid]) { seen[wid] = true; out.push(wid) }
+          }
+        }
+      }
+      // Widgets already configured into the drawer (so already off the live
+      // bar) still belong in the checklist so they can be unchecked.
+      for (var c = 0; c < configured.length; c++) {
+        if (!seen[configured[c]]) { seen[configured[c]] = true; out.push(configured[c]) }
+      }
     }
     out.sort(function(a, b) {
       function rank(x) {
@@ -140,7 +177,13 @@ BarWidget {
 
   function isBarWidgetPlugin(id) {
     var manifest = root.pluginManifest(id)
-    return !!(manifest && Array.isArray(manifest.kinds) && manifest.kinds.indexOf("bar-widget") !== -1)
+    if (manifest) return !!(Array.isArray(manifest.kinds) && manifest.kinds.indexOf("bar-widget") !== -1)
+    if (root.hasFullRegistry) return false
+    // No manifest reachable (sandboxed bar-widget context, see
+    // hasFullRegistry above): anything present in the bar's public layout
+    // snapshot, or already configured into this drawer, is by definition
+    // already a bar widget.
+    return root.layoutHas(id) || root.configuredIds.indexOf(String(id || "")) !== -1
   }
 
   function isFirstPartyPlugin(id) {
@@ -233,23 +276,7 @@ BarWidget {
   readonly property var hiddenViewIds: {
     var rev = root.manageRevision
     void rev
-    var list = null
-    var shell = root.bar && root.bar.shell
-    var config = shell ? shell.shellConfig : null
-    if (config && config.bar && config.bar.layout) {
-      var sections = ["left", "center", "right"]
-      for (var s = 0; s < sections.length; s++) {
-        var arr = config.bar.layout[sections[s]]
-        if (!Array.isArray(arr)) continue
-        for (var i = 0; i < arr.length; i++) {
-          if (arr[i] && String(arr[i].id || "") === root.moduleName) {
-            if (Array.isArray(arr[i].hidden)) list = arr[i].hidden
-            break
-          }
-        }
-        if (list) break
-      }
-    }
+    var list = Array.isArray(root.settings.hidden) ? root.settings.hidden : null
     if (!Array.isArray(list)) return []
     var out = []
     for (var j = 0; j < list.length; j++) {
@@ -297,21 +324,7 @@ BarWidget {
   }
 
   function persistHidden(list) {
-    var id = root.moduleName
-    root.mutateConfig(function(c) {
-      if (!c || !c.bar || !c.bar.layout) return
-      var sections = ["left", "center", "right"]
-      for (var s = 0; s < sections.length; s++) {
-        var arr = c.bar.layout[sections[s]]
-        if (!Array.isArray(arr)) continue
-        for (var k = 0; k < arr.length; k++) {
-          if (arr[k] && String(arr[k].id || "") === id) {
-            arr[k].hidden = list.slice()
-            return
-          }
-        }
-      }
-    })
+    root.persistOwnSettings({ hidden: list.slice() })
   }
 
   function toggleHiddenView(id) {
@@ -332,45 +345,38 @@ BarWidget {
   }
 
   // Generic reader for a sub-setting stored on the drawer's own entry in the
-  // bar layout config.
+  // bar layout config. `root.settings` is this plugin's own injected inline
+  // config, kept current by the host regardless of capability scoping.
   function entrySetting(name, fallback) {
     var rev = root.manageRevision
     void rev
-    var shell = root.bar && root.bar.shell
-    var config = shell ? shell.shellConfig : null
-    if (config && config.bar && config.bar.layout) {
-      var sections = ["left", "center", "right"]
-      for (var s = 0; s < sections.length; s++) {
-        var arr = config.bar.layout[sections[s]]
-        if (!Array.isArray(arr)) continue
-        for (var i = 0; i < arr.length; i++) {
-          if (arr[i] && String(arr[i].id || "") === root.moduleName) {
-            if (arr[i] && name in arr[i] && arr[i][name] !== undefined && arr[i][name] !== null)
-              return arr[i][name]
-            return fallback
-          }
-        }
-      }
-    }
+    if (root.settings && name in root.settings
+        && root.settings[name] !== undefined && root.settings[name] !== null)
+      return root.settings[name]
     return fallback
   }
 
+  // Persists a change to the drawer's own bar-layout entry via
+  // shell.updateEntryInline, the one write path a bar-widget-kind plugin
+  // keeps under Omarchy 4.0.3's capability sandbox (Omarchy-drawer#2):
+  // it is scoped to a plugin's own entry (pluginOwnsTarget), unlike
+  // shell.mutateShellConfig below, which now requires the manifest to
+  // declare kind "bar" and silently no-ops for bar-widget plugins like this
+  // one. updateEntryInline replaces the whole entry, so every existing field
+  // has to be carried over alongside the override.
+  function persistOwnSettings(overrides) {
+    var shell = root.bar && root.bar.shell
+    if (!shell || typeof shell.updateEntryInline !== "function") return false
+    var next = ({})
+    for (var k in root.settings) if (k !== "id") next[k] = root.settings[k]
+    for (var o in overrides) next[o] = overrides[o]
+    return shell.updateEntryInline(root.moduleName, next)
+  }
+
   function persistEntrySetting(name, value) {
-    var id = root.moduleName
-    root.mutateConfig(function(c) {
-      if (!c || !c.bar || !c.bar.layout) return
-      var sections = ["left", "center", "right"]
-      for (var s = 0; s < sections.length; s++) {
-        var arr = c.bar.layout[sections[s]]
-        if (!Array.isArray(arr)) continue
-        for (var k = 0; k < arr.length; k++) {
-          if (arr[k] && String(arr[k].id || "") === id) {
-            arr[k][name] = value
-            return
-          }
-        }
-      }
-    })
+    var o = ({})
+    o[name] = value
+    root.persistOwnSettings(o)
   }
 
   function setGridColumns(n) {
@@ -1139,6 +1145,17 @@ Item {
           width: bodyFlick.width
           spacing: Style.space(4)
 
+          Text {
+            visible: !root.hasFullRegistry
+            width: manageColumn.width
+            text: "Showing bar widgets only — enabling, disabling or adding other plugins needs a newer Omarchy plugin API (see project issue #2)."
+            color: Qt.darker(root.fg, 1.5)
+            font.family: root.ffont
+            font.pixelSize: Style.font.caption
+            font.italic: true
+            wrapMode: Text.Wrap
+          }
+
           Repeater {
             model: root.allPlugins
 
@@ -1237,6 +1254,7 @@ Item {
                 Button {
                   width: 24
                   height: 24
+                  visible: root.hasFullRegistry
                   text: "\uf00c"
                   tooltipText: mrow.enabled ? "Already enabled" : "Enable plugin"
                   foreground: root.bar ? root.bar.foreground : Color.foreground
@@ -1251,6 +1269,7 @@ Item {
                 Button {
                   width: 24
                   height: 24
+                  visible: root.hasFullRegistry
                   text: "\uf00d"
                   tooltipText: root.canDisable(mrow.rowId) ? "Disable plugin" : "Cannot disable"
                   foreground: root.bar ? root.bar.foreground : Color.foreground
@@ -1265,6 +1284,7 @@ Item {
                 Button {
                   width: 24
                   height: 24
+                  visible: root.hasFullRegistry
                   text: "\uf1f8"
                   tooltipText: root.isFirstPartyPlugin(mrow.rowId)
                     ? "Built-in plugin, cannot be removed"
@@ -1327,21 +1347,7 @@ Item {
   // reconcile once so an existing shell.json catches up automatically.
 
   function persistWidgets(list) {
-    var id = root.moduleName
-    root.mutateConfig(function(c) {
-      if (!c || !c.bar || !c.bar.layout) return
-      var sections = ["left", "center", "right"]
-      for (var s = 0; s < sections.length; s++) {
-        var arr = c.bar.layout[sections[s]]
-        if (!Array.isArray(arr)) continue
-        for (var k = 0; k < arr.length; k++) {
-          if (arr[k] && String(arr[k].id || "") === id) {
-            arr[k].widgets = list.slice()
-            return
-          }
-        }
-      }
-    })
+    root.persistOwnSettings({ widgets: list.slice() })
   }
 
   function moveWidgetToIndex(id, toIndex) {
@@ -1359,6 +1365,14 @@ Item {
     root.persistWidgets(list)
   }
 
+  // Broad, whole-config mutation. Since Omarchy 4.0.3, shell.mutateShellConfig
+  // requires the caller's manifest to declare kind "bar" (a full replacement
+  // bar) — a bar-widget-kind plugin like this one now gets `false` back and
+  // nothing is written (Omarchy-drawer#2). Kept for hosts/contexts where it
+  // still works; callers below that rely on it for moving *other* widgets on
+  // or off the bar are a known gap until Omarchy exposes a narrower
+  // capability for that. Persisting this plugin's own entry does not need
+  // this path any more — see persistOwnSettings above.
   function mutateConfig(mutator) {
     var shell = root.bar && root.bar.shell
     if (!shell || typeof shell.mutateShellConfig !== "function") return
@@ -1367,12 +1381,11 @@ Item {
 
   function layoutHas(id) {
     var key = String(id || "")
-    var shell = root.bar && root.bar.shell
-    var config = shell ? shell.shellConfig : null
-    if (!config || !config.bar || !config.bar.layout) return false
-    var sections = ["left", "center", "right"]
-    for (var s = 0; s < sections.length; s++) {
-      var arr = config.bar.layout[sections[s]]
+    var sections = root.barLayoutSections()
+    if (!sections) return false
+    var names = ["left", "center", "right"]
+    for (var s = 0; s < names.length; s++) {
+      var arr = sections[names[s]]
       if (!Array.isArray(arr)) continue
       for (var i = 0; i < arr.length; i++) {
         if (arr[i] && String(arr[i].id || "") === key) return true
@@ -1381,6 +1394,10 @@ Item {
     return false
   }
 
+  // config.plugins[] (the disabled-but-installed list) isn't part of the
+  // public bar.layoutConfig snapshot, so this only works where shellConfig is
+  // still reachable; it degrades to "not found" otherwise, which is the safe
+  // default here (see the callers below).
   function pluginsHas(id) {
     var key = String(id || "")
     var shell = root.bar && root.bar.shell
